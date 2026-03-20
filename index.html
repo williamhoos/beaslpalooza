@@ -593,6 +593,7 @@ let rooms = [];
 let picks = [];
 let appState = { draft_open: false, current_pick_order: 1 };
 let pickerUnlocked = false;
+let pickInProgress = false;
 let realtimeChannel = null;
 
 // =====================================================
@@ -1126,7 +1127,6 @@ function renderDraft() {
   document.body.innerHTML = `
     <div class="header" id="draft-header"></div>
     <div class="container" id="draft-container"></div>
-    <div id="modal-root"></div>
   `;
   updateDraftHeader();
   updateDraftBody();
@@ -1167,24 +1167,31 @@ function updateDraftBody() {
   // Unlock Panel
   const isAdmin = currentUser && currentUser.role === 'admin';
   const pickerHasPassword = currentPicker && currentPicker.password && currentPicker.password.trim() !== '';
+
+  // Auto-unlock if no password set
+  if (!pickerHasPassword && currentPicker && !pickerUnlocked) {
+    pickerUnlocked = true;
+  }
+
   if (appState.draft_open && !draftComplete) {
-    html += `
-      <div class="unlock-panel ${pickerUnlocked ? 'unlocked' : 'locked'}" id="unlock-panel">
-        ${pickerUnlocked
-          ? `<h3>Unlocked! Click any available room below.</h3>`
-          : pickerHasPassword
-            ? `<h3>${currentPicker ? currentPicker.name : '?'}, enter your password to pick your room:</h3>
-               <div>
-                 <input type="password" id="unlock-pw" placeholder="Password" autocomplete="off">
-                 <button class="btn btn-primary" onclick="handleUnlock()">Unlock</button>
-               </div>
-               <div class="unlock-msg" id="unlock-msg"></div>`
-            : `<h3>It's ${currentPicker ? currentPicker.name : '?'}'s turn</h3>
-               <p style="color:var(--gray-500);margin-top:4px">No password set &mdash; an admin must use "Admin Pick" in the draft order table below.</p>
-               <div class="unlock-msg" id="unlock-msg"></div>`
-        }
-      </div>
-    `;
+    if (pickerUnlocked) {
+      html += `
+        <div class="unlock-panel unlocked" id="unlock-panel">
+          <h3>${currentPicker ? currentPicker.name + ' — ' : ''}Select a room below!</h3>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="unlock-panel locked" id="unlock-panel">
+          <h3>${currentPicker ? currentPicker.name : '?'}, enter your password to pick your room:</h3>
+          <div>
+            <input type="password" id="unlock-pw" placeholder="Password" autocomplete="off">
+            <button class="btn btn-primary" onclick="handleUnlock()">Unlock</button>
+          </div>
+          <div class="unlock-msg" id="unlock-msg"></div>
+        </div>
+      `;
+    }
   }
 
   // House sections
@@ -1278,7 +1285,7 @@ function updateDraftBody() {
       }
 
       if (pickerUnlocked && status !== 'full') {
-        html += `<button class="select-room-btn" onclick="confirmPick('${room.id}', '${esc(room.room_label)}', '${esc(house)}')">SELECT THIS ROOM</button>`;
+        html += `<button class="select-room-btn" onclick="executePick('${room.id}')">SELECT THIS ROOM</button>`;
       }
 
       html += `</div></div>`;
@@ -1309,12 +1316,12 @@ function updateDraftBody() {
     if (isPicked) {
       rowClass = 'draft-row-picked';
       statusHtml = '<span class="status-picked">Picked</span>';
+      if (isAdmin) {
+        statusHtml += ` <button class="btn btn-danger btn-small" onclick="undoPick('${p.id}')" style="margin-left:8px">Undo</button>`;
+      }
     } else if (isCurrent) {
       rowClass = 'draft-row-current';
       statusHtml = '<span class="status-current">Picking Now</span>';
-      if (isAdmin && !pickerUnlocked) {
-        statusHtml += ` <button class="btn btn-primary btn-small" onclick="adminPick()" style="margin-left:8px">Admin Pick</button>`;
-      }
     }
 
     html += `<tr class="${rowClass}">
@@ -1379,43 +1386,19 @@ function handleUnlock() {
   }
 }
 
-function adminPick() {
-  // Admin unlocks the pick on behalf of the current participant
-  pickerUnlocked = true;
-  updateDraftBody();
-}
-
-function confirmPick(roomId, roomLabel, house) {
-  const modal = document.getElementById('modal-root');
-  modal.innerHTML = `
-    <div class="modal-overlay" onclick="closeModal()">
-      <div class="modal" onclick="event.stopPropagation()">
-        <h3>Confirm Selection</h3>
-        <p>${roomLabel} in ${house}?</p>
-        <div class="modal-buttons">
-          <button class="btn btn-success" onclick="executePick('${roomId}')">Yes, Select</button>
-          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function closeModal() {
-  document.getElementById('modal-root').innerHTML = '';
-}
-
 async function executePick(roomId) {
-  closeModal();
+  if (pickInProgress) return;
+  pickInProgress = true;
+
   const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
-  if (!currentPicker) return;
+  if (!currentPicker) { pickInProgress = false; return; }
 
   // Insert pick
   const { error: pickErr } = await db.from('picks').insert({
     participant_id: currentPicker.id,
     room_id: roomId
   });
-  if (pickErr) { alert('Error making pick: ' + pickErr.message); return; }
+  if (pickErr) { alert('Error making pick: ' + pickErr.message); pickInProgress = false; return; }
 
   // Find next unpicked participant
   let nextOrder = appState.current_pick_order + 1;
@@ -1435,7 +1418,29 @@ async function executePick(roomId) {
   await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: nextOrder });
   appState.current_pick_order = nextOrder;
   pickerUnlocked = false;
+  pickInProgress = false;
 
+  updateDraftHeader();
+  updateDraftBody();
+}
+
+async function undoPick(participantId) {
+  if (!db) return;
+  // Delete the pick for this participant
+  await db.from('picks').delete().eq('participant_id', participantId);
+
+  // Reload picks
+  const { data: allPicks } = await db.from('picks').select('*');
+  if (allPicks) picks = allPicks;
+
+  // Set current_pick_order back to this participant's order
+  const p = participants.find(pp => pp.id === participantId);
+  if (p) {
+    await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: p.pick_order });
+    appState.current_pick_order = p.pick_order;
+  }
+
+  pickerUnlocked = false;
   updateDraftHeader();
   updateDraftBody();
 }
