@@ -10,18 +10,31 @@
 =============================================================
   1. Run the SQL migration below in your Supabase SQL Editor
   2. In Supabase Dashboard → Database → Replication, enable
-     Realtime on tables: picks, app_state
+     Realtime on tables: picks, drafts
   3. Fill in SUPABASE_URL and SUPABASE_ANON_KEY below
-  4. Open this file directly or deploy to GitHub Pages
+  4. Deploy to GitHub Pages or open locally
+  5. Share draft links: ?d=YOUR_DRAFT_SLUG
 =============================================================
 
 =============================================================
-  SQL MIGRATION — Run this in Supabase SQL Editor
+  SQL MIGRATION v2 — Run this in Supabase SQL Editor
+  (If upgrading from v1, see UPGRADE section below)
 =============================================================
+
+-- Table: drafts
+CREATE TABLE IF NOT EXISTS drafts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug text UNIQUE NOT NULL,
+  name text NOT NULL,
+  draft_open boolean DEFAULT false,
+  current_pick_order integer DEFAULT 1,
+  created_at timestamptz DEFAULT now()
+);
 
 -- Table: participants
-CREATE TABLE participants (
+CREATE TABLE IF NOT EXISTS participants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE,
   name text NOT NULL,
   email text,
   phone text,
@@ -31,9 +44,10 @@ CREATE TABLE participants (
 );
 
 -- Table: rooms
-CREATE TABLE rooms (
+CREATE TABLE IF NOT EXISTS rooms (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  room_id text UNIQUE NOT NULL,
+  draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE,
+  room_id text NOT NULL,
   room_label text NOT NULL,
   house text NOT NULL CHECK (house IN ('House 1', 'House 2', 'House 3')),
   capacity integer DEFAULT 1 CHECK (capacity >= 1 AND capacity <= 4),
@@ -45,37 +59,46 @@ CREATE TABLE rooms (
 );
 
 -- Table: picks
-CREATE TABLE picks (
+CREATE TABLE IF NOT EXISTS picks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE,
   participant_id uuid REFERENCES participants(id) ON DELETE CASCADE,
   room_id uuid REFERENCES rooms(id) ON DELETE CASCADE,
   picked_at timestamptz DEFAULT now()
 );
 
--- Table: app_state (single row)
-CREATE TABLE app_state (
-  id integer PRIMARY KEY DEFAULT 1,
-  draft_open boolean DEFAULT false,
-  current_pick_order integer DEFAULT 1
-);
-
--- Insert default app_state row
-INSERT INTO app_state (id, draft_open, current_pick_order) VALUES (1, false, 1);
-
--- Enable RLS (but allow all operations via anon key for simplicity)
+-- Enable RLS (allow all via anon key)
+ALTER TABLE drafts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE picks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE app_state ENABLE ROW LEVEL SECURITY;
 
+CREATE POLICY "Allow all on drafts" ON drafts FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all on participants" ON participants FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all on rooms" ON rooms FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all on picks" ON picks FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all on app_state" ON app_state FOR ALL USING (true) WITH CHECK (true);
 
--- Enable Realtime (run these or enable via Dashboard → Database → Replication)
+-- Enable Realtime
 ALTER PUBLICATION supabase_realtime ADD TABLE picks;
-ALTER PUBLICATION supabase_realtime ADD TABLE app_state;
+ALTER PUBLICATION supabase_realtime ADD TABLE drafts;
+
+=============================================================
+  UPGRADE from v1 (if you already have tables):
+  Run these ALTER statements instead of the full migration:
+=============================================================
+
+-- CREATE TABLE drafts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), slug text UNIQUE NOT NULL, name text NOT NULL, draft_open boolean DEFAULT false, current_pick_order integer DEFAULT 1, created_at timestamptz DEFAULT now());
+-- ALTER TABLE drafts ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all on drafts" ON drafts FOR ALL USING (true) WITH CHECK (true);
+-- INSERT INTO drafts (slug, name, draft_open, current_pick_order) SELECT 'main', 'Main Draft', draft_open, current_pick_order FROM app_state WHERE id = 1;
+-- ALTER TABLE participants ADD COLUMN draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE;
+-- ALTER TABLE rooms ADD COLUMN draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE;
+-- ALTER TABLE picks ADD COLUMN draft_id uuid REFERENCES drafts(id) ON DELETE CASCADE;
+-- UPDATE participants SET draft_id = (SELECT id FROM drafts WHERE slug = 'main');
+-- UPDATE rooms SET draft_id = (SELECT id FROM drafts WHERE slug = 'main');
+-- UPDATE picks SET draft_id = (SELECT id FROM drafts WHERE slug = 'main');
+-- ALTER TABLE rooms DROP CONSTRAINT rooms_room_id_key;
+-- ALTER PUBLICATION supabase_realtime ADD TABLE drafts;
 
 =============================================================
 -->
@@ -567,6 +590,55 @@ body {
 .modal-buttons { display: flex; gap: 12px; justify-content: center; }
 .modal-buttons .btn { min-width: 100px; }
 
+/* Landing Page */
+.landing-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, var(--navy) 0%, #2d5a8e 100%);
+  padding: 40px 24px;
+}
+.landing-header {
+  text-align: center;
+  color: white;
+  margin-bottom: 40px;
+}
+.landing-header h1 { font-size: 2rem; margin-bottom: 8px; }
+.landing-header p { color: var(--gray-300); }
+.draft-list {
+  max-width: 600px;
+  margin: 0 auto;
+}
+.draft-list-card {
+  background: white;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.draft-list-card:hover { transform: translateY(-2px); }
+.draft-list-card h3 { font-size: 1.1rem; color: var(--navy); }
+.draft-list-card .draft-status {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.draft-list-card .draft-status.open { color: var(--green); }
+.draft-list-card .draft-status.closed { color: var(--gray-400); }
+.landing-admin {
+  text-align: center;
+  margin-top: 32px;
+}
+.landing-admin a {
+  color: var(--gray-300);
+  text-decoration: none;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.landing-admin a:hover { color: white; }
+
 /* Misc */
 .count-info { margin: 8px 0; font-size: 0.9rem; color: var(--gray-500); }
 .actions-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; align-items: center; }
@@ -577,124 +649,190 @@ body {
 
 <script>
 // =====================================================
-// CONFIGURATION — Fill in your Supabase credentials
+// CONFIGURATION
 // =====================================================
 const SUPABASE_URL = "https://kkjsfefqamvfqgdfiucr.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_z9qkxi-EyfDbVwVtDGv6aQ_YR2EgWXu";
 const ADMIN_PASSWORD = "admin2024";
 
+
 // =====================================================
 // APP STATE
 // =====================================================
 let db;
-let currentUser = null;  // { role: 'admin' } or { role: 'participant', participant: {...} }
+let isAdmin = false;
+let currentDraft = null; // { id, slug, name, draft_open, current_pick_order }
 let participants = [];
 let rooms = [];
 let picks = [];
-let appState = { draft_open: false, current_pick_order: 1 };
 let pickerUnlocked = false;
 let pickInProgress = false;
-let lastPickInfo = null; // { name, roomLabel }
+let lastPickInfo = null;
 let realtimeChannel = null;
 
 // =====================================================
-// INIT
+// INIT & ROUTING
 // =====================================================
-function initApp() {
+async function initApp() {
   try {
     db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   } catch (e) {
     console.error('Supabase init error:', e);
   }
-  renderLogin();
+
+  // Route based on URL params
+  const params = new URLSearchParams(window.location.search);
+  const draftSlug = params.get('d');
+
+  if (draftSlug) {
+    // Direct draft link — load and show (no login needed)
+    await loadDraftBySlug(draftSlug);
+    if (currentDraft) {
+      await loadDraftData();
+      renderDraft();
+    } else {
+      renderLanding('Draft not found');
+    }
+  } else {
+    // Landing page
+    renderLanding();
+  }
+}
+
+async function loadDraftBySlug(slug) {
+  if (!db) return;
+  const { data } = await db.from('drafts').select('*').eq('slug', slug).single();
+  if (data) currentDraft = data;
+}
+
+async function loadDraftById(id) {
+  if (!db) return;
+  const { data } = await db.from('drafts').select('*').eq('id', id).single();
+  if (data) currentDraft = data;
 }
 
 // =====================================================
-// RENDER: LOGIN
+// LANDING PAGE
 // =====================================================
-function renderLogin() {
+async function renderLanding(errorMsg) {
+  let drafts = [];
+  if (db) {
+    const { data } = await db.from('drafts').select('*').order('created_at', { ascending: false });
+    if (data) drafts = data;
+  }
+
+  const openDrafts = drafts.filter(d => d.draft_open);
+  const closedDrafts = drafts.filter(d => !d.draft_open);
+
   document.body.innerHTML = `
-    <div class="login-screen">
-      <div class="login-card">
+    <div class="landing-page">
+      <div class="landing-header">
         <h1>Bazel Palooza Room Draft</h1>
-        <p class="subtitle">Enter your password to continue</p>
-        <input type="password" id="login-pw" placeholder="Password" autocomplete="off">
-        <button class="btn-login" onclick="handleLogin()">Enter</button>
-        <div class="login-error" id="login-error"></div>
+        <p>Select a draft to view</p>
+        ${errorMsg ? `<p style="color:var(--red);margin-top:8px">${esc(errorMsg)}</p>` : ''}
+      </div>
+      <div class="draft-list">
+        ${drafts.length === 0 ? '<div style="text-align:center;color:var(--gray-300)">No drafts yet. Admin can create one.</div>' : ''}
+        ${openDrafts.map(d => `
+          <div class="draft-list-card" onclick="navigateToDraft('${esc(d.slug)}')">
+            <div>
+              <h3>${esc(d.name)}</h3>
+              <div style="font-size:0.8rem;color:var(--gray-500);margin-top:4px">/${esc(d.slug)}</div>
+            </div>
+            <span class="draft-status open">Live</span>
+          </div>
+        `).join('')}
+        ${closedDrafts.map(d => `
+          <div class="draft-list-card" onclick="navigateToDraft('${esc(d.slug)}')">
+            <div>
+              <h3>${esc(d.name)}</h3>
+              <div style="font-size:0.8rem;color:var(--gray-500);margin-top:4px">/${esc(d.slug)}</div>
+            </div>
+            <span class="draft-status closed">Not started</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="landing-admin">
+        <a onclick="promptAdminLogin()">Admin Setup</a>
       </div>
     </div>
   `;
-  document.getElementById('login-pw').addEventListener('keydown', e => {
-    if (e.key === 'Enter') handleLogin();
-  });
-  document.getElementById('login-pw').focus();
 }
 
-async function handleLogin() {
-  const pw = document.getElementById('login-pw').value.trim();
-  const errEl = document.getElementById('login-error');
-  if (!pw) { errEl.textContent = 'Please enter a password'; return; }
+function navigateToDraft(slug) {
+  window.location.href = '?d=' + encodeURIComponent(slug);
+}
 
+function promptAdminLogin() {
+  const pw = prompt('Enter admin password:');
   if (pw === ADMIN_PASSWORD) {
-    currentUser = { role: 'admin' };
-    await loadAllData();
+    isAdmin = true;
     renderSetup();
-    return;
-  }
-
-  // Check participant password
-  const { data, error } = await db.from('participants').select('*');
-  if (error) { errEl.textContent = 'Error connecting to database'; return; }
-  if (!data || data.length === 0) {
-    errEl.textContent = 'Draft not configured yet';
-    return;
-  }
-  const match = data.find(p => p.password === pw);
-  if (match) {
-    currentUser = { role: 'participant', participant: match };
-    participants = data.sort((a, b) => a.pick_order - b.pick_order);
-    await loadAllData();
-    if (!appState.draft_open) {
-      errEl.textContent = 'Draft has not started yet. Please wait.';
-      return;
-    }
-    renderDraft();
-  } else {
-    errEl.textContent = 'Incorrect password';
+  } else if (pw) {
+    alert('Incorrect admin password');
   }
 }
 
 // =====================================================
-// DATA LOADING
+// DATA LOADING (scoped by draft_id)
 // =====================================================
-async function loadAllData() {
-  if (!db) return;
+async function loadDraftData() {
+  if (!db || !currentDraft) return;
   try {
-    const [pRes, rRes, pkRes, asRes] = await Promise.all([
-      db.from('participants').select('*').order('pick_order'),
-      db.from('rooms').select('*').order('house,room_label'),
-      db.from('picks').select('*'),
-      db.from('app_state').select('*').eq('id', 1).single()
+    const did = currentDraft.id;
+    const [pRes, rRes, pkRes] = await Promise.all([
+      db.from('participants').select('*').eq('draft_id', did).order('pick_order'),
+      db.from('rooms').select('*').eq('draft_id', did).order('house,room_label'),
+      db.from('picks').select('*').eq('draft_id', did)
     ]);
     if (pRes.data) participants = pRes.data;
     if (rRes.data) rooms = rRes.data;
     if (pkRes.data) picks = pkRes.data;
-    if (asRes.data) appState = asRes.data;
   } catch (e) {
     console.error('Error loading data:', e);
   }
 }
 
+async function reloadDraft() {
+  if (!db || !currentDraft) return;
+  const { data } = await db.from('drafts').select('*').eq('id', currentDraft.id).single();
+  if (data) currentDraft = data;
+}
+
 // =====================================================
 // SETUP PAGE
 // =====================================================
-function renderSetup() {
+let allDrafts = [];
+
+async function renderSetup() {
+  if (db) {
+    const { data } = await db.from('drafts').select('*').order('created_at', { ascending: false });
+    if (data) allDrafts = data;
+  }
+  if (currentDraft) await loadDraftData();
+
   document.body.innerHTML = `
     <div class="header">
       <h1>Bazel Palooza Room Draft</h1>
       <span style="font-size:0.85rem;color:var(--gray-300)">Admin Setup</span>
     </div>
     <div class="container">
+      <div class="card" style="margin-bottom:24px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div>
+            <label style="font-weight:600;margin-right:8px">Draft:</label>
+            <select id="draft-select" onchange="switchDraft(this.value)" style="padding:8px 12px;border:1px solid var(--gray-200);border-radius:8px;font-size:0.9rem">
+              ${!currentDraft ? '<option value="">-- Select a draft --</option>' : ''}
+              ${allDrafts.map(d => `<option value="${d.id}" ${currentDraft && currentDraft.id === d.id ? 'selected' : ''}>${esc(d.name)} (${esc(d.slug)})</option>`).join('')}
+            </select>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary btn-small" onclick="createNewDraft()">+ New Draft</button>
+            ${currentDraft ? `<button class="btn btn-danger btn-small" onclick="deleteDraft()">Delete Draft</button>` : ''}
+          </div>
+        </div>
+      </div>
+      ${currentDraft ? `
       <div class="tabs">
         <button class="tab-btn active" data-tab="participants" onclick="switchTab('participants')">Participants</button>
         <button class="tab-btn" data-tab="rooms" onclick="switchTab('rooms')">Rooms</button>
@@ -705,12 +843,43 @@ function renderSetup() {
       <div id="tab-rooms" class="tab-content"></div>
       <div id="tab-maps" class="tab-content"></div>
       <div id="tab-launch" class="tab-content"></div>
+      ` : '<div class="card"><p style="text-align:center;color:var(--gray-500)">Select or create a draft to get started.</p></div>'}
     </div>
   `;
-  renderParticipantsTab();
-  renderRoomsTab();
-  renderMapsTab();
-  renderLaunchTab();
+  if (currentDraft) {
+    renderParticipantsTab();
+    renderRoomsTab();
+    renderMapsTab();
+    renderLaunchTab();
+  }
+}
+
+async function createNewDraft() {
+  const name = prompt('Draft name (e.g. "Beasl 2026"):');
+  if (!name) return;
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!slug) { alert('Invalid name'); return; }
+
+  const { data, error } = await db.from('drafts').insert({ name, slug }).select().single();
+  if (error) { alert('Error: ' + error.message); return; }
+  currentDraft = data;
+  await renderSetup();
+}
+
+async function switchDraft(draftId) {
+  if (!draftId) { currentDraft = null; await renderSetup(); return; }
+  await loadDraftById(draftId);
+  await loadDraftData();
+  await renderSetup();
+}
+
+async function deleteDraft() {
+  if (!currentDraft) return;
+  if (!confirm('Delete draft "' + currentDraft.name + '" and all its data?')) return;
+  await db.from('drafts').delete().eq('id', currentDraft.id);
+  currentDraft = null;
+  participants = []; rooms = []; picks = [];
+  await renderSetup();
 }
 
 function switchTab(name) {
@@ -807,10 +976,12 @@ async function saveParticipants() {
   });
 
   // Delete all existing then re-insert (simpler than diff)
-  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000'); // clear picks first (FK)
-  await db.from('participants').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  const did = currentDraft.id;
+  await db.from('picks').delete().eq('draft_id', did);
+  await db.from('participants').delete().eq('draft_id', did);
 
   const rows = participants.map(p => ({
+    draft_id: did,
     name: p.name,
     email: p.email,
     phone: p.phone,
@@ -946,10 +1117,12 @@ async function saveRooms() {
     }
   });
 
-  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-  await db.from('rooms').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  const did = currentDraft.id;
+  await db.from('picks').delete().eq('draft_id', did);
+  await db.from('rooms').delete().eq('draft_id', did);
 
   const rows = rooms.map(r => ({
+    draft_id: did,
     room_id: r.room_id,
     room_label: r.room_label,
     house: r.house,
@@ -1075,6 +1248,10 @@ function renderLaunchTab() {
         <span>House 2 Map: ${map2 ? '<span style="color:var(--green)">Uploaded</span>' : '<span style="color:var(--red)">Not uploaded</span>'}</span> &nbsp;|&nbsp;
         <span>House 3 Map: ${map3 ? '<span style="color:var(--green)">Uploaded</span>' : '<span style="color:var(--red)">Not uploaded</span>'}</span>
       </div>
+      <div style="margin-bottom:16px;padding:12px;background:var(--gray-100);border-radius:8px">
+        <strong>Share link:</strong> <code>${window.location.origin + window.location.pathname}?d=${currentDraft ? esc(currentDraft.slug) : ''}</code>
+        <button class="btn btn-outline btn-small" onclick="navigator.clipboard.writeText(window.location.origin + window.location.pathname + '?d=${currentDraft ? currentDraft.slug : ''}').then(()=>alert('Copied!'))" style="margin-left:8px">Copy</button>
+      </div>
       <div class="actions-bar">
         <button class="btn btn-success" onclick="openDraft()" style="font-size:1.1rem;padding:14px 32px">Open Draft</button>
         <button class="btn btn-danger" onclick="resetDraftPicks()">Reset Draft Picks</button>
@@ -1089,29 +1266,30 @@ async function openDraft() {
   const msg = document.getElementById('launch-msg');
   msg.textContent = 'Opening draft...';
   msg.style.color = 'var(--navy)';
-  await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: 1 });
-  appState.draft_open = true;
-  appState.current_pick_order = 1;
+  await db.from('drafts').update({ draft_open: true, current_pick_order: 1 }).eq('id', currentDraft.id);
+  currentDraft.draft_open = true;
+  currentDraft.current_pick_order = 1;
   msg.textContent = 'Draft opened! Navigating...';
   msg.style.color = 'var(--green)';
-  setTimeout(() => renderDraft(), 500);
+  setTimeout(() => { window.location.href = '?d=' + currentDraft.slug; }, 500);
 }
 
 async function resetDraftPicks() {
   if (!confirm('Reset all picks? This will clear all room selections but keep participants and rooms.')) return;
   const msg = document.getElementById('launch-msg');
   msg.textContent = 'Resetting...';
-  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-  await db.from('app_state').upsert({ id: 1, draft_open: false, current_pick_order: 1 });
+  await db.from('picks').delete().eq('draft_id', currentDraft.id);
+  await db.from('drafts').update({ draft_open: false, current_pick_order: 1 }).eq('id', currentDraft.id);
   picks = [];
-  appState = { id: 1, draft_open: false, current_pick_order: 1 };
+  currentDraft.draft_open = false;
+  currentDraft.current_pick_order = 1;
   msg.textContent = 'Draft picks reset!';
   msg.style.color = 'var(--green)';
   renderLaunchTab();
 }
 
 function goToDraftView() {
-  renderDraft();
+  window.location.href = '?d=' + currentDraft.slug;
 }
 
 // =====================================================
@@ -1121,9 +1299,9 @@ function renderDraft() {
   pickerUnlocked = false;
   setupRealtime();
 
-  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
-  const nextPicker = participants.find(p => p.pick_order === appState.current_pick_order + 1);
-  const draftComplete = !currentPicker || appState.current_pick_order > Math.max(...participants.map(p => p.pick_order));
+  const currentPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order);
+  const nextPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order + 1);
+  const draftComplete = !currentPicker || currentDraft.current_pick_order > Math.max(...participants.map(p => p.pick_order));
 
   document.body.innerHTML = `
     <div class="header" id="draft-header"></div>
@@ -1134,10 +1312,10 @@ function renderDraft() {
 }
 
 function updateDraftHeader() {
-  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
-  const nextPicker = participants.find(p => p.pick_order === appState.current_pick_order + 1);
+  const currentPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order);
+  const nextPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order + 1);
   const maxOrder = participants.length > 0 ? Math.max(...participants.map(p => p.pick_order)) : 0;
-  const draftComplete = !currentPicker || appState.current_pick_order > maxOrder;
+  const draftComplete = !currentPicker || currentDraft.current_pick_order > maxOrder;
 
   const header = document.getElementById('draft-header');
   if (!header) return;
@@ -1147,7 +1325,7 @@ function updateDraftHeader() {
     <div class="status-center">
       ${draftComplete
         ? '<span class="draft-complete-pill">Draft Complete! All rooms assigned.</span>'
-        : `<span class="pick-pill">Pick #${appState.current_pick_order} &mdash; ${currentPicker ? currentPicker.name : '?'}'s Turn</span>
+        : `<span class="pick-pill">Pick #${currentDraft.current_pick_order} &mdash; ${currentPicker ? currentPicker.name : '?'}'s Turn</span>
            ${nextPicker ? `<span class="next-text">Next: ${nextPicker.name}</span>` : ''}`
       }
     </div>
@@ -1159,14 +1337,14 @@ function updateDraftBody() {
   const container = document.getElementById('draft-container');
   if (!container) return;
 
-  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const currentPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order);
   const maxOrder = participants.length > 0 ? Math.max(...participants.map(p => p.pick_order)) : 0;
-  const draftComplete = !currentPicker || appState.current_pick_order > maxOrder;
+  const draftComplete = !currentPicker || currentDraft.current_pick_order > maxOrder;
 
   let html = '';
 
   // Unlock Panel
-  const isAdmin = currentUser && currentUser.role === 'admin';
+  // isAdmin is a global variable set via promptAdmin
   const pickerHasPassword = currentPicker && currentPicker.password && currentPicker.password.trim() !== '';
 
   // Auto-unlock if no password set OR if admin
@@ -1174,7 +1352,7 @@ function updateDraftBody() {
     pickerUnlocked = true;
   }
 
-  if (appState.draft_open && !draftComplete) {
+  if (currentDraft.draft_open && !draftComplete) {
     const lastPickHtml = lastPickInfo
       ? `<div style="margin-bottom:8px;font-size:0.95rem;color:var(--gray-600)">${esc(lastPickInfo.name)} picked <strong>${esc(lastPickInfo.roomLabel)}</strong></div>`
       : '';
@@ -1183,7 +1361,7 @@ function updateDraftBody() {
       html += `
         <div class="unlock-panel unlocked" id="unlock-panel">
           ${lastPickHtml}
-          <h3>Pick #${appState.current_pick_order}: ${currentPicker ? currentPicker.name : '?'} — Select a room below!</h3>
+          <h3>Pick #${currentDraft.current_pick_order}: ${currentPicker ? currentPicker.name : '?'} — Select a room below!</h3>
         </div>
       `;
     } else {
@@ -1315,7 +1493,7 @@ function updateDraftBody() {
   participants.forEach(p => {
     const pick = picks.find(pk => pk.participant_id === p.id);
     const room = pick ? rooms.find(r => r.id === pick.room_id) : null;
-    const isCurrent = p.pick_order === appState.current_pick_order && !draftComplete;
+    const isCurrent = p.pick_order === currentDraft.current_pick_order && !draftComplete;
     const isPicked = !!pick;
 
     let rowClass = 'draft-row-waiting';
@@ -1376,7 +1554,7 @@ function handleUnlock() {
   if (!pwEl) return;
   const pw = pwEl.value.trim();
   const msg = document.getElementById('unlock-msg');
-  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const currentPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order);
 
   if (!currentPicker) { msg.textContent = 'No current picker found'; msg.style.color = 'var(--red)'; return; }
 
@@ -1397,7 +1575,7 @@ async function executePick(roomId) {
   if (pickInProgress) return;
   pickInProgress = true;
 
-  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const currentPicker = participants.find(p => p.pick_order === currentDraft.current_pick_order);
   if (!currentPicker) { pickInProgress = false; return; }
 
   // Store last pick info for display
@@ -1407,16 +1585,17 @@ async function executePick(roomId) {
   // Insert pick
   const { error: pickErr } = await db.from('picks').insert({
     participant_id: currentPicker.id,
-    room_id: roomId
+    room_id: roomId,
+    draft_id: currentDraft.id
   });
   if (pickErr) { alert('Error making pick: ' + pickErr.message); pickInProgress = false; lastPickInfo = null; return; }
 
   // Find next unpicked participant
-  let nextOrder = appState.current_pick_order + 1;
+  let nextOrder = currentDraft.current_pick_order + 1;
   const maxOrder = Math.max(...participants.map(p => p.pick_order));
 
   // Reload picks to check
-  const { data: allPicks } = await db.from('picks').select('*');
+  const { data: allPicks } = await db.from('picks').select('*').eq('draft_id', currentDraft.id);
   if (allPicks) picks = allPicks;
 
   const pickedParticipantIds = new Set(picks.map(pk => pk.participant_id));
@@ -1426,8 +1605,8 @@ async function executePick(roomId) {
     nextOrder++;
   }
 
-  await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: nextOrder });
-  appState.current_pick_order = nextOrder;
+  await db.from('drafts').update({ current_pick_order: nextOrder }).eq('id', currentDraft.id);
+  currentDraft.current_pick_order = nextOrder;
   pickerUnlocked = false;
   pickInProgress = false;
 
@@ -1441,14 +1620,14 @@ async function clearPick(participantId) {
   await db.from('picks').delete().eq('participant_id', participantId);
 
   // Reload picks
-  const { data: allPicks } = await db.from('picks').select('*');
+  const { data: allPicks } = await db.from('picks').select('*').eq('draft_id', currentDraft.id);
   if (allPicks) picks = allPicks;
 
   // Set current_pick_order to this participant so they can re-pick
   const p = participants.find(pp => pp.id === participantId);
   if (p) {
-    await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: p.pick_order });
-    appState.current_pick_order = p.pick_order;
+    await db.from('drafts').update({ current_pick_order: p.pick_order }).eq('id', currentDraft.id);
+    currentDraft.current_pick_order = p.pick_order;
   }
 
   lastPickInfo = null;
@@ -1464,7 +1643,7 @@ function promptAdmin() {
       db.removeChannel(realtimeChannel);
       realtimeChannel = null;
     }
-    currentUser = { role: 'admin' };
+    isAdmin = true;
     renderSetup();
   } else if (pw) {
     alert('Incorrect admin password');
@@ -1501,19 +1680,19 @@ function setupRealtime() {
     db.removeChannel(realtimeChannel);
   }
 
-  realtimeChannel = db.channel('draft-updates')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'picks' }, async () => {
-      const { data } = await db.from('picks').select('*');
+  const did = currentDraft.id;
+  realtimeChannel = db.channel('draft-updates-' + did)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'picks', filter: 'draft_id=eq.' + did }, async () => {
+      const { data } = await db.from('picks').select('*').eq('draft_id', did);
       if (data) picks = data;
       updateDraftHeader();
       updateDraftBody();
     })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, async (payload) => {
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'drafts', filter: 'id=eq.' + did }, async (payload) => {
       if (payload.new) {
-        appState = payload.new;
+        currentDraft = payload.new;
       } else {
-        const { data } = await db.from('app_state').select('*').eq('id', 1).single();
-        if (data) appState = data;
+        await reloadDraft();
       }
       pickerUnlocked = false;
       updateDraftHeader();
