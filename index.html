@@ -1,0 +1,1536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bazel Palooza Room Draft</title>
+<!--
+=============================================================
+  SETUP INSTRUCTIONS
+=============================================================
+  1. Run the SQL migration below in your Supabase SQL Editor
+  2. In Supabase Dashboard → Database → Replication, enable
+     Realtime on tables: picks, app_state
+  3. Fill in SUPABASE_URL and SUPABASE_ANON_KEY below
+  4. Open this file directly or deploy to GitHub Pages
+=============================================================
+
+=============================================================
+  SQL MIGRATION — Run this in Supabase SQL Editor
+=============================================================
+
+-- Table: participants
+CREATE TABLE participants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  email text,
+  phone text,
+  password text,
+  pick_order integer NOT NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Table: rooms
+CREATE TABLE rooms (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  room_id text UNIQUE NOT NULL,
+  room_label text NOT NULL,
+  house text NOT NULL CHECK (house IN ('House 1', 'House 2', 'House 3')),
+  capacity integer DEFAULT 1 CHECK (capacity >= 1 AND capacity <= 4),
+  image_url text,
+  info_url_1 text,
+  info_url_2 text,
+  notes text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Table: picks
+CREATE TABLE picks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  participant_id uuid REFERENCES participants(id) ON DELETE CASCADE,
+  room_id uuid REFERENCES rooms(id) ON DELETE CASCADE,
+  picked_at timestamptz DEFAULT now()
+);
+
+-- Table: app_state (single row)
+CREATE TABLE app_state (
+  id integer PRIMARY KEY DEFAULT 1,
+  draft_open boolean DEFAULT false,
+  current_pick_order integer DEFAULT 1
+);
+
+-- Insert default app_state row
+INSERT INTO app_state (id, draft_open, current_pick_order) VALUES (1, false, 1);
+
+-- Enable RLS (but allow all operations via anon key for simplicity)
+ALTER TABLE participants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rooms ENABLE ROW LEVEL SECURITY;
+ALTER TABLE picks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_state ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all on participants" ON participants FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on rooms" ON rooms FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on picks" ON picks FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on app_state" ON app_state FOR ALL USING (true) WITH CHECK (true);
+
+-- Enable Realtime (run these or enable via Dashboard → Database → Replication)
+ALTER PUBLICATION supabase_realtime ADD TABLE picks;
+ALTER PUBLICATION supabase_realtime ADD TABLE app_state;
+
+=============================================================
+-->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.0/papaparse.min.js"></script>
+<style>
+:root {
+  --navy: #1E3A5F;
+  --navy-light: #2A4A6F;
+  --white: #FFFFFF;
+  --gray-bg: #F8FAFC;
+  --gray-100: #F1F5F9;
+  --gray-200: #E2E8F0;
+  --gray-300: #CBD5E1;
+  --gray-400: #94A3B8;
+  --gray-500: #64748B;
+  --gray-600: #475569;
+  --gray-700: #334155;
+  --blue: #3B82F6;
+  --green: #10B981;
+  --amber: #F59E0B;
+  --red: #EF4444;
+  --gold-bg: #FEF3C7;
+  --green-bg: #D1FAE5;
+  --gold-pill: #D97706;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--gray-bg);
+  color: var(--gray-700);
+  min-height: 100vh;
+}
+
+/* Header */
+.header {
+  background: var(--navy);
+  color: white;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.header h1 { font-size: 1.2rem; font-weight: 700; }
+.header .status-center {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header .pick-pill {
+  background: var(--gold-pill);
+  color: white;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  animation: pulse-pill 2s ease-in-out infinite;
+}
+@keyframes pulse-pill {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(217,119,6,0); }
+}
+.header .next-text { font-size: 0.85rem; color: var(--gray-300); }
+.header .admin-link {
+  color: var(--gray-300);
+  text-decoration: none;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.header .admin-link:hover { color: white; }
+.draft-complete-pill {
+  background: var(--green);
+  color: white;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-weight: 700;
+}
+
+/* Login Screen */
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, var(--navy) 0%, #2d5a8e 100%);
+}
+.login-card {
+  background: white;
+  border-radius: 16px;
+  padding: 48px 40px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  text-align: center;
+  max-width: 400px;
+  width: 90%;
+}
+.login-card h1 { font-size: 1.8rem; color: var(--navy); margin-bottom: 8px; }
+.login-card .subtitle { color: var(--gray-500); margin-bottom: 32px; }
+.login-card input {
+  width: 100%;
+  padding: 14px 16px;
+  border: 2px solid var(--gray-200);
+  border-radius: 10px;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.login-card input:focus { border-color: var(--blue); }
+.login-card .btn-login {
+  width: 100%;
+  margin-top: 16px;
+  padding: 14px;
+  background: var(--navy);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.login-card .btn-login:hover { background: var(--navy-light); }
+.login-error {
+  color: var(--red);
+  margin-top: 12px;
+  font-size: 0.9rem;
+  min-height: 1.2em;
+}
+
+/* Common */
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-primary { background: var(--navy); color: white; }
+.btn-primary:hover { background: var(--navy-light); }
+.btn-success { background: var(--green); color: white; }
+.btn-success:hover { background: #059669; }
+.btn-danger { background: var(--red); color: white; }
+.btn-danger:hover { background: #DC2626; }
+.btn-outline {
+  background: white;
+  color: var(--navy);
+  border: 2px solid var(--gray-200);
+}
+.btn-outline:hover { border-color: var(--navy); }
+.btn-small { padding: 6px 12px; font-size: 0.8rem; }
+
+/* Setup Tabs */
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--gray-100);
+  padding: 4px;
+  border-radius: 12px;
+  margin-bottom: 24px;
+}
+.tab-btn {
+  flex: 1;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--gray-500);
+  transition: all 0.2s;
+}
+.tab-btn.active {
+  background: white;
+  color: var(--navy);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Tables */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.data-table th {
+  background: var(--gray-100);
+  padding: 12px;
+  text-align: left;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--gray-500);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.data-table td {
+  padding: 8px 12px;
+  border-top: 1px solid var(--gray-100);
+  vertical-align: middle;
+}
+.data-table input, .data-table select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.data-table input:focus, .data-table select:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+.table-wrapper { overflow-x: auto; margin: 16px 0; }
+.delete-btn {
+  background: none;
+  border: none;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.delete-btn:hover { background: #FEE2E2; }
+
+/* Cards */
+.card {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin-bottom: 16px;
+}
+
+/* Room Cards */
+.room-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+@media (max-width: 900px) { .room-cards-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px) { .room-cards-grid { grid-template-columns: 1fr; } }
+
+.room-card {
+  background: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  border: 2px solid var(--gray-200);
+  transition: all 0.3s;
+  position: relative;
+}
+.room-card.available { border-color: var(--green); }
+.room-card.partial { border-color: var(--amber); }
+.room-card.full { border-color: var(--gray-300); }
+.room-card.full .room-card-body { opacity: 0.6; }
+
+.room-card-img {
+  height: 140px;
+  background: var(--gray-100);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-400);
+  font-size: 2rem;
+  overflow: hidden;
+}
+.room-card-img img { width: 100%; height: 100%; object-fit: cover; }
+
+.room-card-body { padding: 16px; }
+.room-card-label { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+.room-card-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.badge {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge-h1 { background: #DBEAFE; color: #1D4ED8; }
+.badge-h2 { background: #D1FAE5; color: #047857; }
+.badge-h3 { background: #FEF3C7; color: #B45309; }
+.badge-single { background: var(--gray-100); color: var(--gray-600); }
+.badge-double { background: var(--gray-100); color: var(--gray-600); }
+.badge-available { background: #D1FAE5; color: #047857; }
+.badge-partial { background: #FEF3C7; color: #B45309; }
+.badge-taken { background: #FEE2E2; color: #B91C1C; }
+
+.room-card-notes { font-size: 0.8rem; color: var(--gray-500); font-style: italic; margin: 6px 0; }
+.room-card-links { display: flex; gap: 8px; margin: 8px 0; }
+.room-card-links a {
+  font-size: 0.8rem;
+  color: var(--blue);
+  text-decoration: none;
+}
+.room-card-links a:hover { text-decoration: underline; }
+
+.room-card-occupants {
+  margin-top: 8px;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.select-room-btn {
+  width: 100%;
+  padding: 12px;
+  background: var(--green);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: 12px;
+  animation: pulse-select 1.5s ease-in-out infinite;
+}
+@keyframes pulse-select {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(16,185,129,0); }
+}
+.select-room-btn:hover { background: #059669; }
+
+/* Unlock Panel */
+.unlock-panel {
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 24px;
+  text-align: center;
+  transition: background 0.3s;
+}
+.unlock-panel.locked { background: var(--gold-bg); border: 2px solid var(--amber); }
+.unlock-panel.unlocked { background: var(--green-bg); border: 2px solid var(--green); }
+.unlock-panel h3 { margin-bottom: 12px; font-size: 1.1rem; }
+.unlock-panel input {
+  padding: 12px 16px;
+  border: 2px solid var(--gray-200);
+  border-radius: 8px;
+  font-size: 1rem;
+  width: 250px;
+  max-width: 80%;
+}
+.unlock-panel .btn { margin-left: 8px; }
+.unlock-msg { margin-top: 8px; font-weight: 600; font-size: 0.9rem; }
+
+/* House Section */
+.house-section { margin-bottom: 32px; }
+.house-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 16px;
+  background: white;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.house-section-header h2 { font-size: 1.2rem; }
+.house-section-header .toggle { font-size: 1.2rem; transition: transform 0.2s; }
+.house-section-header .toggle.collapsed { transform: rotate(-90deg); }
+
+.house-map-container {
+  max-height: 400px;
+  overflow: auto;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  text-align: center;
+}
+.house-map-container img { max-width: 100%; max-height: 400px; }
+
+.room-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: white;
+  border-radius: 8px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--gray-bg);
+}
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.legend-dot.green { background: var(--green); }
+.legend-dot.amber { background: var(--amber); }
+.legend-dot.red { background: var(--red); }
+
+/* Draft Order Table */
+.draft-order-section { margin-top: 32px; }
+.draft-order-section h2 { margin-bottom: 16px; }
+.draft-row-current { background: var(--gold-bg) !important; }
+.draft-row-picked { }
+.draft-row-waiting { color: var(--gray-400); }
+.status-picked { color: var(--green); font-weight: 600; }
+.status-current { color: var(--gold-pill); font-weight: 700; }
+.status-waiting { color: var(--gray-400); }
+
+/* Setup specific */
+.upload-area {
+  border: 2px dashed var(--gray-300);
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  margin: 16px 0;
+  background: var(--gray-bg);
+}
+.upload-area input[type="file"] { margin-top: 8px; }
+
+.map-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+@media (max-width: 600px) { .map-upload-grid { grid-template-columns: 1fr; } }
+.map-upload-card {
+  border: 2px dashed var(--gray-300);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  background: var(--gray-bg);
+}
+.map-upload-card h4 { margin-bottom: 12px; color: var(--navy); }
+.map-preview { max-width: 100%; max-height: 200px; border-radius: 8px; margin-top: 12px; }
+.map-status { margin-top: 8px; font-size: 0.85rem; }
+
+.launch-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+@media (max-width: 600px) { .launch-summary { grid-template-columns: 1fr; } }
+.summary-card {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.summary-card .number { font-size: 2.5rem; font-weight: 800; color: var(--navy); }
+.summary-card .label { font-size: 0.85rem; color: var(--gray-500); margin-top: 4px; }
+
+.warn-text { color: var(--red); font-weight: 600; margin: 12px 0; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.modal {
+  background: white;
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 420px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.modal h3 { margin-bottom: 8px; font-size: 1.2rem; }
+.modal p { color: var(--gray-500); margin-bottom: 24px; }
+.modal-buttons { display: flex; gap: 12px; justify-content: center; }
+.modal-buttons .btn { min-width: 100px; }
+
+/* Misc */
+.count-info { margin: 8px 0; font-size: 0.9rem; color: var(--gray-500); }
+.actions-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; align-items: center; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<script>
+// =====================================================
+// CONFIGURATION — Fill in your Supabase credentials
+// =====================================================
+const SUPABASE_URL = "https://kkjsfefqamvfqgdfiucr.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_z9qkxi-EyfDbVwVtDGv6aQ_YR2EgWXu";
+const ADMIN_PASSWORD = "admin2024";
+
+// =====================================================
+// APP STATE
+// =====================================================
+let db;
+let currentUser = null;  // { role: 'admin' } or { role: 'participant', participant: {...} }
+let participants = [];
+let rooms = [];
+let picks = [];
+let appState = { draft_open: false, current_pick_order: 1 };
+let pickerUnlocked = false;
+let realtimeChannel = null;
+
+// =====================================================
+// INIT
+// =====================================================
+function initApp() {
+  try {
+    db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  } catch (e) {
+    console.error('Supabase init error:', e);
+  }
+  renderLogin();
+}
+
+// =====================================================
+// RENDER: LOGIN
+// =====================================================
+function renderLogin() {
+  document.body.innerHTML = `
+    <div class="login-screen">
+      <div class="login-card">
+        <h1>Bazel Palooza Room Draft</h1>
+        <p class="subtitle">Enter your password to continue</p>
+        <input type="password" id="login-pw" placeholder="Password" autocomplete="off">
+        <button class="btn-login" onclick="handleLogin()">Enter</button>
+        <div class="login-error" id="login-error"></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('login-pw').addEventListener('keydown', e => {
+    if (e.key === 'Enter') handleLogin();
+  });
+  document.getElementById('login-pw').focus();
+}
+
+async function handleLogin() {
+  const pw = document.getElementById('login-pw').value.trim();
+  const errEl = document.getElementById('login-error');
+  if (!pw) { errEl.textContent = 'Please enter a password'; return; }
+
+  if (pw === ADMIN_PASSWORD) {
+    currentUser = { role: 'admin' };
+    await loadAllData();
+    renderSetup();
+    return;
+  }
+
+  // Check participant password
+  const { data, error } = await db.from('participants').select('*');
+  if (error) { errEl.textContent = 'Error connecting to database'; return; }
+  if (!data || data.length === 0) {
+    errEl.textContent = 'Draft not configured yet';
+    return;
+  }
+  const match = data.find(p => p.password === pw);
+  if (match) {
+    currentUser = { role: 'participant', participant: match };
+    participants = data.sort((a, b) => a.pick_order - b.pick_order);
+    await loadAllData();
+    if (!appState.draft_open) {
+      errEl.textContent = 'Draft has not started yet. Please wait.';
+      return;
+    }
+    renderDraft();
+  } else {
+    errEl.textContent = 'Incorrect password';
+  }
+}
+
+// =====================================================
+// DATA LOADING
+// =====================================================
+async function loadAllData() {
+  if (!db) return;
+  try {
+    const [pRes, rRes, pkRes, asRes] = await Promise.all([
+      db.from('participants').select('*').order('pick_order'),
+      db.from('rooms').select('*').order('house,room_label'),
+      db.from('picks').select('*'),
+      db.from('app_state').select('*').eq('id', 1).single()
+    ]);
+    if (pRes.data) participants = pRes.data;
+    if (rRes.data) rooms = rRes.data;
+    if (pkRes.data) picks = pkRes.data;
+    if (asRes.data) appState = asRes.data;
+  } catch (e) {
+    console.error('Error loading data:', e);
+  }
+}
+
+// =====================================================
+// SETUP PAGE
+// =====================================================
+function renderSetup() {
+  document.body.innerHTML = `
+    <div class="header">
+      <h1>Bazel Palooza Room Draft</h1>
+      <span style="font-size:0.85rem;color:var(--gray-300)">Admin Setup</span>
+    </div>
+    <div class="container">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="participants" onclick="switchTab('participants')">Participants</button>
+        <button class="tab-btn" data-tab="rooms" onclick="switchTab('rooms')">Rooms</button>
+        <button class="tab-btn" data-tab="maps" onclick="switchTab('maps')">House Maps</button>
+        <button class="tab-btn" data-tab="launch" onclick="switchTab('launch')">Launch Draft</button>
+      </div>
+      <div id="tab-participants" class="tab-content active"></div>
+      <div id="tab-rooms" class="tab-content"></div>
+      <div id="tab-maps" class="tab-content"></div>
+      <div id="tab-launch" class="tab-content"></div>
+    </div>
+  `;
+  renderParticipantsTab();
+  renderRoomsTab();
+  renderMapsTab();
+  renderLaunchTab();
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === name);
+  });
+  ['participants', 'rooms', 'maps', 'launch'].forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === name);
+  });
+  if (name === 'launch') renderLaunchTab();
+}
+
+// --- Participants Tab ---
+function renderParticipantsTab() {
+  const el = document.getElementById('tab-participants');
+  el.innerHTML = `
+    <div class="card">
+      <h3>Manage Participants</h3>
+      <div class="actions-bar">
+        <button class="btn btn-outline btn-small" onclick="downloadSampleParticipantsCSV()">Download Sample CSV</button>
+        <label class="btn btn-outline btn-small" style="cursor:pointer">
+          Upload CSV <input type="file" accept=".csv" style="display:none" onchange="handleParticipantCSV(event)">
+        </label>
+      </div>
+      <div class="count-info">Participants: <strong>${participants.length}</strong></div>
+      <div class="table-wrapper">
+        <table class="data-table" id="participants-table">
+          <thead>
+            <tr>
+              <th>Pick Order</th><th>Name</th><th>Email</th><th>Phone</th><th>Password</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions-bar">
+        <button class="btn btn-outline btn-small" onclick="addParticipantRow()">+ Add Row</button>
+        <button class="btn btn-primary" onclick="saveParticipants()">Save Changes</button>
+        <span id="participants-save-msg" style="font-size:0.85rem;color:var(--green)"></span>
+      </div>
+    </div>
+  `;
+  renderParticipantsTableRows();
+}
+
+function renderParticipantsTableRows() {
+  const tbody = document.querySelector('#participants-table tbody');
+  tbody.innerHTML = '';
+  participants.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="number" value="${p.pick_order || i + 1}" data-field="pick_order" data-idx="${i}" min="1" style="width:60px"></td>
+      <td><input type="text" value="${esc(p.name || '')}" data-field="name" data-idx="${i}"></td>
+      <td><input type="text" value="${esc(p.email || '')}" data-field="email" data-idx="${i}"></td>
+      <td><input type="text" value="${esc(p.phone || '')}" data-field="phone" data-idx="${i}"></td>
+      <td><input type="text" value="${esc(p.password || '')}" data-field="password" data-idx="${i}"></td>
+      <td><button class="delete-btn" onclick="deleteParticipantRow(${i})" title="Delete">&#10005;</button></td>
+    `;
+    tr.querySelectorAll('input').forEach(inp => {
+      inp.addEventListener('change', () => {
+        const idx = parseInt(inp.dataset.idx);
+        const field = inp.dataset.field;
+        participants[idx][field] = field === 'pick_order' ? parseInt(inp.value) : inp.value;
+      });
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function addParticipantRow() {
+  const maxOrder = participants.reduce((m, p) => Math.max(m, p.pick_order || 0), 0);
+  participants.push({ id: null, name: '', email: '', phone: '', password: '', pick_order: maxOrder + 1, _new: true });
+  renderParticipantsTab();
+}
+
+function deleteParticipantRow(idx) {
+  const p = participants[idx];
+  if (p.id && !p._new) p._deleted = true;
+  participants.splice(idx, 1);
+  renderParticipantsTab();
+}
+
+async function saveParticipants() {
+  const msg = document.getElementById('participants-save-msg');
+  msg.textContent = 'Saving...';
+
+  // Collect from inputs to be safe
+  document.querySelectorAll('#participants-table tbody input').forEach(inp => {
+    const idx = parseInt(inp.dataset.idx);
+    const field = inp.dataset.field;
+    if (idx >= 0 && idx < participants.length) {
+      participants[idx][field] = field === 'pick_order' ? parseInt(inp.value) : inp.value;
+    }
+  });
+
+  // Delete all existing then re-insert (simpler than diff)
+  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000'); // clear picks first (FK)
+  await db.from('participants').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+
+  const rows = participants.map(p => ({
+    name: p.name,
+    email: p.email,
+    phone: p.phone,
+    password: p.password,
+    pick_order: p.pick_order
+  }));
+
+  if (rows.length > 0) {
+    const { data, error } = await db.from('participants').insert(rows).select();
+    if (error) { msg.textContent = 'Error: ' + error.message; return; }
+    participants = data.sort((a, b) => a.pick_order - b.pick_order);
+  } else {
+    participants = [];
+  }
+
+  picks = [];
+  msg.textContent = 'Saved!';
+  renderParticipantsTab();
+  setTimeout(() => { if (msg) msg.textContent = ''; }, 2000);
+}
+
+function downloadSampleParticipantsCSV() {
+  const csv = 'name,email,phone,password,order\nAlice Smith,alice@email.com,555-0101,alice123,1\nBob Jones,bob@email.com,555-0102,bob123,2\nCarol White,carol@email.com,555-0103,carol123,3\nDave Brown,dave@email.com,555-0104,dave123,4\nEve Green,eve@email.com,555-0105,eve123,5';
+  downloadFile('sample_participants.csv', csv);
+}
+
+function handleParticipantCSV(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: (results) => {
+      participants = results.data.map(r => ({
+        id: null, _new: true,
+        name: r.name || '',
+        email: r.email || '',
+        phone: r.phone || '',
+        password: r.password || '',
+        pick_order: parseInt(r.order || r.pick_order) || 0
+      }));
+      renderParticipantsTab();
+    }
+  });
+}
+
+// --- Rooms Tab ---
+function renderRoomsTab() {
+  const totalCap = rooms.reduce((s, r) => s + (r.capacity || 1), 0);
+  const el = document.getElementById('tab-rooms');
+  el.innerHTML = `
+    <div class="card">
+      <h3>Manage Rooms</h3>
+      <div class="actions-bar">
+        <button class="btn btn-outline btn-small" onclick="downloadSampleRoomsCSV()">Download Sample CSV</button>
+        <label class="btn btn-outline btn-small" style="cursor:pointer">
+          Upload CSV <input type="file" accept=".csv" style="display:none" onchange="handleRoomCSV(event)">
+        </label>
+      </div>
+      <div class="count-info">Rooms: <strong>${rooms.length}</strong> | Total Capacity: <strong>${totalCap}</strong></div>
+      <div class="table-wrapper">
+        <table class="data-table" id="rooms-table">
+          <thead>
+            <tr>
+              <th>Room ID</th><th>Label</th><th>House</th><th>Cap</th><th>Image URL</th><th>Info URL 1</th><th>Info URL 2</th><th>Notes</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions-bar">
+        <button class="btn btn-outline btn-small" onclick="addRoomRow()">+ Add Row</button>
+        <button class="btn btn-primary" onclick="saveRooms()">Save Changes</button>
+        <span id="rooms-save-msg" style="font-size:0.85rem;color:var(--green)"></span>
+      </div>
+    </div>
+  `;
+  renderRoomsTableRows();
+}
+
+function renderRoomsTableRows() {
+  const tbody = document.querySelector('#rooms-table tbody');
+  tbody.innerHTML = '';
+  rooms.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="text" value="${esc(r.room_id || '')}" data-field="room_id" data-idx="${i}" style="width:120px"></td>
+      <td><input type="text" value="${esc(r.room_label || '')}" data-field="room_label" data-idx="${i}"></td>
+      <td>
+        <select data-field="house" data-idx="${i}">
+          <option value="House 1" ${r.house === 'House 1' ? 'selected' : ''}>House 1</option>
+          <option value="House 2" ${r.house === 'House 2' ? 'selected' : ''}>House 2</option>
+          <option value="House 3" ${r.house === 'House 3' ? 'selected' : ''}>House 3</option>
+        </select>
+      </td>
+      <td><input type="number" value="${r.capacity || 1}" data-field="capacity" data-idx="${i}" min="1" max="4" style="width:50px"></td>
+      <td><input type="text" value="${esc(r.image_url || '')}" data-field="image_url" data-idx="${i}" style="width:100px"></td>
+      <td><input type="text" value="${esc(r.info_url_1 || '')}" data-field="info_url_1" data-idx="${i}" style="width:100px"></td>
+      <td><input type="text" value="${esc(r.info_url_2 || '')}" data-field="info_url_2" data-idx="${i}" style="width:100px"></td>
+      <td><input type="text" value="${esc(r.notes || '')}" data-field="notes" data-idx="${i}"></td>
+      <td><button class="delete-btn" onclick="deleteRoomRow(${i})" title="Delete">&#10005;</button></td>
+    `;
+    tr.querySelectorAll('input, select').forEach(inp => {
+      inp.addEventListener('change', () => {
+        const idx = parseInt(inp.dataset.idx);
+        const field = inp.dataset.field;
+        rooms[idx][field] = field === 'capacity' ? parseInt(inp.value) : inp.value;
+      });
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function addRoomRow() {
+  rooms.push({ id: null, _new: true, room_id: '', room_label: '', house: 'House 1', capacity: 1, image_url: '', info_url_1: '', info_url_2: '', notes: '' });
+  renderRoomsTab();
+}
+
+function deleteRoomRow(idx) {
+  rooms.splice(idx, 1);
+  renderRoomsTab();
+}
+
+async function saveRooms() {
+  const msg = document.getElementById('rooms-save-msg');
+  msg.textContent = 'Saving...';
+
+  document.querySelectorAll('#rooms-table tbody input, #rooms-table tbody select').forEach(inp => {
+    const idx = parseInt(inp.dataset.idx);
+    const field = inp.dataset.field;
+    if (idx >= 0 && idx < rooms.length) {
+      rooms[idx][field] = field === 'capacity' ? parseInt(inp.value) : inp.value;
+    }
+  });
+
+  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  await db.from('rooms').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+
+  const rows = rooms.map(r => ({
+    room_id: r.room_id,
+    room_label: r.room_label,
+    house: r.house,
+    capacity: r.capacity || 1,
+    image_url: r.image_url || null,
+    info_url_1: r.info_url_1 || null,
+    info_url_2: r.info_url_2 || null,
+    notes: r.notes || null
+  }));
+
+  if (rows.length > 0) {
+    const { data, error } = await db.from('rooms').insert(rows).select();
+    if (error) { msg.textContent = 'Error: ' + error.message; return; }
+    rooms = data;
+  } else {
+    rooms = [];
+  }
+
+  picks = [];
+  msg.textContent = 'Saved!';
+  renderRoomsTab();
+  setTimeout(() => { if (msg) msg.textContent = ''; }, 2000);
+}
+
+function downloadSampleRoomsCSV() {
+  const csv = 'room_id,room_label,house,capacity,image_url,info_url_1,info_url_2,notes\nhouse1-blue-room,Blue Room,House 1,1,,,,"Cozy corner room"\nhouse1-master-suite,Master Suite,House 1,2,,,,"Ensuite bathroom"\nhouse2-garden-room,Garden Room,House 2,1,,,,"Garden view"\nhouse2-twin-room,Twin Room,House 2,2,,,,"Two twin beds"\nhouse3-loft,The Loft,House 3,1,,,,"Top floor"\nhouse3-bunk-room,Bunk Room,House 3,2,,,,"Great for sharing"';
+  downloadFile('sample_rooms.csv', csv);
+}
+
+function handleRoomCSV(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: (results) => {
+      rooms = results.data.map(r => ({
+        id: null, _new: true,
+        room_id: r.room_id || '',
+        room_label: r.room_label || '',
+        house: r.house || 'House 1',
+        capacity: parseInt(r.capacity) || 1,
+        image_url: r.image_url || '',
+        info_url_1: r.info_url_1 || '',
+        info_url_2: r.info_url_2 || '',
+        notes: r.notes || ''
+      }));
+      renderRoomsTab();
+    }
+  });
+}
+
+// --- House Maps Tab ---
+function renderMapsTab() {
+  const el = document.getElementById('tab-maps');
+  el.innerHTML = `
+    <div class="card">
+      <h3>House Maps</h3>
+      <p style="color:var(--gray-500);margin-bottom:16px">Upload floor plan images for each house. Stored locally in your browser.</p>
+      <div class="map-upload-grid">
+        ${['House 1', 'House 2', 'House 3'].map(h => {
+          const key = 'map_' + h.replace(' ', '_');
+          const stored = localStorage.getItem(key);
+          return `
+            <div class="map-upload-card">
+              <h4>${h} Map</h4>
+              <input type="file" accept="image/jpeg,image/png" onchange="handleMapUpload('${key}', event)">
+              ${stored ? `<img src="${stored}" class="map-preview">` : '<div class="map-status" style="color:var(--gray-400)">No map uploaded</div>'}
+              ${stored ? `<button class="btn btn-outline btn-small" style="margin-top:8px" onclick="removeMap('${key}')">Remove</button>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function handleMapUpload(key, event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    localStorage.setItem(key, e.target.result);
+    renderMapsTab();
+  };
+  reader.readAsDataURL(file);
+}
+
+function removeMap(key) {
+  localStorage.removeItem(key);
+  renderMapsTab();
+}
+
+// --- Launch Tab ---
+function renderLaunchTab() {
+  const totalCap = rooms.reduce((s, r) => s + (r.capacity || 1), 0);
+  const map1 = !!localStorage.getItem('map_House_1');
+  const map2 = !!localStorage.getItem('map_House_2');
+  const map3 = !!localStorage.getItem('map_House_3');
+  const warn = totalCap < participants.length;
+
+  const el = document.getElementById('tab-launch');
+  el.innerHTML = `
+    <div class="card">
+      <h3>Launch Draft</h3>
+      <div class="launch-summary">
+        <div class="summary-card">
+          <div class="number">${participants.length}</div>
+          <div class="label">Participants</div>
+        </div>
+        <div class="summary-card">
+          <div class="number">${rooms.length}</div>
+          <div class="label">Rooms</div>
+        </div>
+        <div class="summary-card">
+          <div class="number">${totalCap}</div>
+          <div class="label">Total Capacity</div>
+        </div>
+      </div>
+      ${warn ? '<div class="warn-text">Warning: Total capacity (' + totalCap + ') is less than participant count (' + participants.length + ')!</div>' : ''}
+      <div style="margin-bottom:16px">
+        <span>House 1 Map: ${map1 ? '<span style="color:var(--green)">Uploaded</span>' : '<span style="color:var(--red)">Not uploaded</span>'}</span> &nbsp;|&nbsp;
+        <span>House 2 Map: ${map2 ? '<span style="color:var(--green)">Uploaded</span>' : '<span style="color:var(--red)">Not uploaded</span>'}</span> &nbsp;|&nbsp;
+        <span>House 3 Map: ${map3 ? '<span style="color:var(--green)">Uploaded</span>' : '<span style="color:var(--red)">Not uploaded</span>'}</span>
+      </div>
+      <div class="actions-bar">
+        <button class="btn btn-success" onclick="openDraft()" style="font-size:1.1rem;padding:14px 32px">Open Draft</button>
+        <button class="btn btn-danger" onclick="resetDraftPicks()">Reset Draft Picks</button>
+        <button class="btn btn-outline" onclick="goToDraftView()">View Draft Page</button>
+      </div>
+      <div id="launch-msg" style="margin-top:12px;font-size:0.9rem"></div>
+    </div>
+  `;
+}
+
+async function openDraft() {
+  const msg = document.getElementById('launch-msg');
+  msg.textContent = 'Opening draft...';
+  msg.style.color = 'var(--navy)';
+  await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: 1 });
+  appState.draft_open = true;
+  appState.current_pick_order = 1;
+  msg.textContent = 'Draft opened! Navigating...';
+  msg.style.color = 'var(--green)';
+  setTimeout(() => renderDraft(), 500);
+}
+
+async function resetDraftPicks() {
+  if (!confirm('Reset all picks? This will clear all room selections but keep participants and rooms.')) return;
+  const msg = document.getElementById('launch-msg');
+  msg.textContent = 'Resetting...';
+  await db.from('picks').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  await db.from('app_state').upsert({ id: 1, draft_open: false, current_pick_order: 1 });
+  picks = [];
+  appState = { id: 1, draft_open: false, current_pick_order: 1 };
+  msg.textContent = 'Draft picks reset!';
+  msg.style.color = 'var(--green)';
+  renderLaunchTab();
+}
+
+function goToDraftView() {
+  renderDraft();
+}
+
+// =====================================================
+// DRAFT PAGE
+// =====================================================
+function renderDraft() {
+  pickerUnlocked = false;
+  setupRealtime();
+
+  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const nextPicker = participants.find(p => p.pick_order === appState.current_pick_order + 1);
+  const draftComplete = !currentPicker || appState.current_pick_order > Math.max(...participants.map(p => p.pick_order));
+
+  document.body.innerHTML = `
+    <div class="header" id="draft-header"></div>
+    <div class="container" id="draft-container"></div>
+    <div id="modal-root"></div>
+  `;
+  updateDraftHeader();
+  updateDraftBody();
+}
+
+function updateDraftHeader() {
+  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const nextPicker = participants.find(p => p.pick_order === appState.current_pick_order + 1);
+  const maxOrder = participants.length > 0 ? Math.max(...participants.map(p => p.pick_order)) : 0;
+  const draftComplete = !currentPicker || appState.current_pick_order > maxOrder;
+
+  const header = document.getElementById('draft-header');
+  if (!header) return;
+
+  header.innerHTML = `
+    <h1>Bazel Palooza Room Draft</h1>
+    <div class="status-center">
+      ${draftComplete
+        ? '<span class="draft-complete-pill">Draft Complete! All rooms assigned.</span>'
+        : `<span class="pick-pill">Pick #${appState.current_pick_order} &mdash; ${currentPicker ? currentPicker.name : '?'}'s Turn</span>
+           ${nextPicker ? `<span class="next-text">Next: ${nextPicker.name}</span>` : ''}`
+      }
+    </div>
+    <a class="admin-link" onclick="promptAdmin()">Admin</a>
+  `;
+}
+
+function updateDraftBody() {
+  const container = document.getElementById('draft-container');
+  if (!container) return;
+
+  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  const maxOrder = participants.length > 0 ? Math.max(...participants.map(p => p.pick_order)) : 0;
+  const draftComplete = !currentPicker || appState.current_pick_order > maxOrder;
+
+  let html = '';
+
+  // Unlock Panel
+  const isAdmin = currentUser && currentUser.role === 'admin';
+  const pickerHasPassword = currentPicker && currentPicker.password && currentPicker.password.trim() !== '';
+  if (appState.draft_open && !draftComplete) {
+    html += `
+      <div class="unlock-panel ${pickerUnlocked ? 'unlocked' : 'locked'}" id="unlock-panel">
+        ${pickerUnlocked
+          ? `<h3>Unlocked! Click any available room below.</h3>`
+          : pickerHasPassword
+            ? `<h3>${currentPicker ? currentPicker.name : '?'}, enter your password to pick your room:</h3>
+               <div>
+                 <input type="password" id="unlock-pw" placeholder="Password" autocomplete="off">
+                 <button class="btn btn-primary" onclick="handleUnlock()">Unlock</button>
+               </div>
+               <div class="unlock-msg" id="unlock-msg"></div>`
+            : `<h3>It's ${currentPicker ? currentPicker.name : '?'}'s turn</h3>
+               <p style="color:var(--gray-500);margin-top:4px">No password set &mdash; an admin must use "Admin Pick" in the draft order table below.</p>
+               <div class="unlock-msg" id="unlock-msg"></div>`
+        }
+      </div>
+    `;
+  }
+
+  // House sections
+  const houses = ['House 1', 'House 2', 'House 3'];
+  const houseColors = { 'House 1': '#3B82F6', 'House 2': '#10B981', 'House 3': '#F59E0B' };
+  const houseBadgeClass = { 'House 1': 'badge-h1', 'House 2': 'badge-h2', 'House 3': 'badge-h3' };
+
+  houses.forEach(house => {
+    const houseRooms = rooms.filter(r => r.house === house);
+    if (houseRooms.length === 0) return;
+
+    const mapKey = 'map_' + house.replace(' ', '_');
+    const mapData = localStorage.getItem(mapKey);
+
+    html += `<div class="house-section">`;
+    html += `<div class="house-section-header" onclick="toggleHouse('${house}')">
+      <h2 style="color:${houseColors[house]}">${house}</h2>
+      <span class="toggle" id="toggle-${house.replace(' ', '')}">&#9660;</span>
+    </div>`;
+    html += `<div class="house-section-body" id="body-${house.replace(' ', '')}">`;
+
+    if (mapData) {
+      html += `<div class="house-map-container"><img src="${mapData}" alt="${house} Map"></div>`;
+    }
+
+    // Room legend
+    html += `<div class="room-legend">`;
+    houseRooms.forEach(room => {
+      const roomPicks = picks.filter(pk => pk.room_id === room.id);
+      const taken = roomPicks.length;
+      const cap = room.capacity || 1;
+      let dotClass = 'green';
+      if (taken >= cap) dotClass = 'red';
+      else if (taken > 0) dotClass = 'amber';
+
+      const occupants = roomPicks.map(pk => {
+        const p = participants.find(pp => pp.id === pk.participant_id);
+        return p ? p.name : '?';
+      });
+
+      html += `<span class="legend-item">
+        <span class="legend-dot ${dotClass}"></span>
+        ${esc(room.room_label)}${occupants.length > 0 ? ' &rarr; ' + occupants.join(', ') : ''}
+      </span>`;
+    });
+    html += `</div>`;
+
+    // Room cards grid
+    html += `<div class="room-cards-grid">`;
+    houseRooms.forEach(room => {
+      const roomPicks = picks.filter(pk => pk.room_id === room.id);
+      const taken = roomPicks.length;
+      const cap = room.capacity || 1;
+      let status = 'available';
+      if (taken >= cap) status = 'full';
+      else if (taken > 0) status = 'partial';
+
+      const occupants = roomPicks.map(pk => {
+        const p = participants.find(pp => pp.id === pk.participant_id);
+        return p ? p.name : '?';
+      });
+
+      html += `<div class="room-card ${status}">`;
+      html += `<div class="room-card-img">`;
+      if (room.image_url) {
+        html += `<img src="${esc(room.image_url)}" alt="${esc(room.room_label)}" onerror="this.parentElement.innerHTML='&#127969;'">`;
+      } else {
+        html += '&#127969;';
+      }
+      html += `</div>`;
+
+      html += `<div class="room-card-body">`;
+      html += `<div class="room-card-label">${esc(room.room_label)}</div>`;
+      html += `<div class="room-card-badges">
+        <span class="badge ${houseBadgeClass[house]}">${house}</span>
+        <span class="badge ${cap > 1 ? 'badge-double' : 'badge-single'}">${cap > 1 ? 'Double' : 'Single'}</span>
+        ${status === 'available' ? '<span class="badge badge-available">Available</span>' : ''}
+        ${status === 'partial' ? `<span class="badge badge-partial">${taken} of ${cap} taken</span>` : ''}
+        ${status === 'full' ? '<span class="badge badge-taken">Taken</span>' : ''}
+      </div>`;
+
+      if (room.notes) html += `<div class="room-card-notes">${esc(room.notes)}</div>`;
+
+      const links = [];
+      if (room.info_url_1) links.push(`<a href="${esc(room.info_url_1)}" target="_blank" rel="noopener">Link 1</a>`);
+      if (room.info_url_2) links.push(`<a href="${esc(room.info_url_2)}" target="_blank" rel="noopener">Link 2</a>`);
+      if (links.length) html += `<div class="room-card-links">${links.join('')}</div>`;
+
+      if (occupants.length > 0) {
+        html += `<div class="room-card-occupants">${occupants.join(', ')}</div>`;
+      }
+
+      if (pickerUnlocked && status !== 'full') {
+        html += `<button class="select-room-btn" onclick="confirmPick('${room.id}', '${esc(room.room_label)}', '${esc(house)}')">SELECT THIS ROOM</button>`;
+      }
+
+      html += `</div></div>`;
+    });
+    html += `</div></div></div>`;
+  });
+
+  // Draft Order Table
+  html += `
+    <div class="draft-order-section">
+      <h2>Draft Order &amp; Selections</h2>
+      <div class="table-wrapper">
+        <table class="data-table" id="draft-order-table">
+          <thead>
+            <tr><th>Pick #</th><th>Name</th><th>Room</th><th>House</th><th>Type</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+  `;
+
+  participants.forEach(p => {
+    const pick = picks.find(pk => pk.participant_id === p.id);
+    const room = pick ? rooms.find(r => r.id === pick.room_id) : null;
+    const isCurrent = p.pick_order === appState.current_pick_order && !draftComplete;
+    const isPicked = !!pick;
+
+    let rowClass = 'draft-row-waiting';
+    let statusHtml = '<span class="status-waiting">Waiting</span>';
+    if (isPicked) {
+      rowClass = 'draft-row-picked';
+      statusHtml = '<span class="status-picked">Picked</span>';
+    } else if (isCurrent) {
+      rowClass = 'draft-row-current';
+      statusHtml = '<span class="status-current">Picking Now</span>';
+      if (isAdmin && !pickerUnlocked) {
+        statusHtml += ` <button class="btn btn-primary btn-small" onclick="adminPick()" style="margin-left:8px">Admin Pick</button>`;
+      }
+    }
+
+    html += `<tr class="${rowClass}">
+      <td>${p.pick_order}</td>
+      <td>${esc(p.name)}</td>
+      <td>${room ? esc(room.room_label) : '&mdash;'}</td>
+      <td>${room ? esc(room.house) : '&mdash;'}</td>
+      <td>${room ? (room.capacity > 1 ? 'Double' : 'Single') : '&mdash;'}</td>
+      <td>${statusHtml}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table></div>
+    <div class="actions-bar" style="margin-top:12px">
+      <button class="btn btn-outline btn-small" onclick="copyDraftAsText()">Copy as Text</button>
+      <button class="btn btn-outline btn-small" onclick="downloadDraftCSV()">Download CSV</button>
+    </div>
+  </div>`;
+
+  container.innerHTML = html;
+
+  // Set up unlock enter key
+  const unlockPw = document.getElementById('unlock-pw');
+  if (unlockPw) {
+    unlockPw.addEventListener('keydown', e => { if (e.key === 'Enter') handleUnlock(); });
+    unlockPw.focus();
+  }
+}
+
+function toggleHouse(house) {
+  const id = house.replace(' ', '');
+  const body = document.getElementById('body-' + id);
+  const toggle = document.getElementById('toggle-' + id);
+  if (body.style.display === 'none') {
+    body.style.display = '';
+    toggle.classList.remove('collapsed');
+  } else {
+    body.style.display = 'none';
+    toggle.classList.add('collapsed');
+  }
+}
+
+function handleUnlock() {
+  const pwEl = document.getElementById('unlock-pw');
+  if (!pwEl) return;
+  const pw = pwEl.value.trim();
+  const msg = document.getElementById('unlock-msg');
+  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+
+  if (!currentPicker) { msg.textContent = 'No current picker found'; msg.style.color = 'var(--red)'; return; }
+
+  if (currentPicker.password && pw === currentPicker.password) {
+    pickerUnlocked = true;
+    updateDraftBody();
+  } else if (pw === ADMIN_PASSWORD) {
+    // Admin can unlock for anyone
+    pickerUnlocked = true;
+    updateDraftBody();
+  } else {
+    msg.textContent = `Wrong password — only ${currentPicker.name} can pick right now.`;
+    msg.style.color = 'var(--red)';
+  }
+}
+
+function adminPick() {
+  // Admin unlocks the pick on behalf of the current participant
+  pickerUnlocked = true;
+  updateDraftBody();
+}
+
+function confirmPick(roomId, roomLabel, house) {
+  const modal = document.getElementById('modal-root');
+  modal.innerHTML = `
+    <div class="modal-overlay" onclick="closeModal()">
+      <div class="modal" onclick="event.stopPropagation()">
+        <h3>Confirm Selection</h3>
+        <p>${roomLabel} in ${house}?</p>
+        <div class="modal-buttons">
+          <button class="btn btn-success" onclick="executePick('${roomId}')">Yes, Select</button>
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function closeModal() {
+  document.getElementById('modal-root').innerHTML = '';
+}
+
+async function executePick(roomId) {
+  closeModal();
+  const currentPicker = participants.find(p => p.pick_order === appState.current_pick_order);
+  if (!currentPicker) return;
+
+  // Insert pick
+  const { error: pickErr } = await db.from('picks').insert({
+    participant_id: currentPicker.id,
+    room_id: roomId
+  });
+  if (pickErr) { alert('Error making pick: ' + pickErr.message); return; }
+
+  // Find next unpicked participant
+  let nextOrder = appState.current_pick_order + 1;
+  const maxOrder = Math.max(...participants.map(p => p.pick_order));
+
+  // Reload picks to check
+  const { data: allPicks } = await db.from('picks').select('*');
+  if (allPicks) picks = allPicks;
+
+  const pickedParticipantIds = new Set(picks.map(pk => pk.participant_id));
+  while (nextOrder <= maxOrder) {
+    const nextP = participants.find(p => p.pick_order === nextOrder);
+    if (nextP && !pickedParticipantIds.has(nextP.id)) break;
+    nextOrder++;
+  }
+
+  await db.from('app_state').upsert({ id: 1, draft_open: true, current_pick_order: nextOrder });
+  appState.current_pick_order = nextOrder;
+  pickerUnlocked = false;
+
+  updateDraftHeader();
+  updateDraftBody();
+}
+
+function promptAdmin() {
+  const pw = prompt('Enter admin password:');
+  if (pw === ADMIN_PASSWORD) {
+    if (realtimeChannel && db) {
+      db.removeChannel(realtimeChannel);
+      realtimeChannel = null;
+    }
+    currentUser = { role: 'admin' };
+    renderSetup();
+  } else if (pw) {
+    alert('Incorrect admin password');
+  }
+}
+
+// Draft export functions
+function copyDraftAsText() {
+  let text = 'Pick #\tName\tRoom\tHouse\tType\tStatus\n';
+  participants.forEach(p => {
+    const pick = picks.find(pk => pk.participant_id === p.id);
+    const room = pick ? rooms.find(r => r.id === pick.room_id) : null;
+    text += `${p.pick_order}\t${p.name}\t${room ? room.room_label : '-'}\t${room ? room.house : '-'}\t${room ? (room.capacity > 1 ? 'Double' : 'Single') : '-'}\t${pick ? 'Picked' : 'Waiting'}\n`;
+  });
+  navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
+}
+
+function downloadDraftCSV() {
+  let csv = 'Pick Order,Name,Room,House,Type,Status\n';
+  participants.forEach(p => {
+    const pick = picks.find(pk => pk.participant_id === p.id);
+    const room = pick ? rooms.find(r => r.id === pick.room_id) : null;
+    csv += `${p.pick_order},"${p.name}","${room ? room.room_label : ''}","${room ? room.house : ''}","${room ? (room.capacity > 1 ? 'Double' : 'Single') : ''}","${pick ? 'Picked' : 'Waiting'}"\n`;
+  });
+  downloadFile('draft_results.csv', csv);
+}
+
+// =====================================================
+// REALTIME
+// =====================================================
+function setupRealtime() {
+  if (!db) return;
+  if (realtimeChannel) {
+    db.removeChannel(realtimeChannel);
+  }
+
+  realtimeChannel = db.channel('draft-updates')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'picks' }, async () => {
+      const { data } = await db.from('picks').select('*');
+      if (data) picks = data;
+      updateDraftHeader();
+      updateDraftBody();
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, async (payload) => {
+      if (payload.new) {
+        appState = payload.new;
+      } else {
+        const { data } = await db.from('app_state').select('*').eq('id', 1).single();
+        if (data) appState = data;
+      }
+      pickerUnlocked = false;
+      updateDraftHeader();
+      updateDraftBody();
+    })
+    .subscribe();
+}
+
+// =====================================================
+// UTILITIES
+// =====================================================
+function esc(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// Init on load
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
+</script>
+
+</body>
+</html>
